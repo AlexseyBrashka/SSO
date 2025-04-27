@@ -1,63 +1,98 @@
 package server
 
 import (
+	"SSO/internal/storage"
 	"context"
 	"errors"
+	"github.com/google/uuid"
 	"net/mail"
 
-	ssov1 "github.com/AlexseyBrashka/protos/gen/go/sso"
+	ssov2 "github.com/AlexseyBrashka/protos/gen/go/sso"
 
 	"SSO/internal/services/auth"
 
-	"SSO/internal/storage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-const (
-	nilApp = 0
-)
-
 type serverAPI struct {
-	ssov1.UnimplementedAuthServer
 	auth Auth
+	ssov2.UnimplementedAuthServer
 }
 type Auth interface {
 	Login(
 		ctx context.Context,
 		email string,
 		password string,
-		appID int,
-	) (token string, err error)
+		appUUID uuid.UUID,
+	) (accessToken string, refreshToken string, err error)
 
 	RegisterNewUser(
 		ctx context.Context,
 		email string,
 		password string,
-	) (userID int64, err error)
+	) (userUUID uuid.UUID, err error)
+
+	Logout(
+		ctx context.Context,
+		email string,
+		AppUUID uuid.UUID,
+	) error
+
+	AddPermission(
+		ctx context.Context,
+		appUUID uuid.UUID,
+		permission string,
+	) (uuid.UUID, error)
+
+	RemovePermission(
+		ctx context.Context,
+		appUUID uuid.UUID,
+		permission string,
+	) error
+
+	GrantPermission(
+		ctx context.Context,
+		email string,
+		permission string,
+	) (accessToken string, refreshToken string, err error)
+
+	RevokePermission(
+		ctx context.Context,
+		email string,
+		permission string,
+	) (accessToken string, refreshToken string, err error)
+
+	RefreshToken(
+		ctx context.Context,
+		actualRefreshToken string,
+	) (accessToken string, refreshToken string, err error)
 }
 
 func Register(gRPCServer *grpc.Server, auth Auth) {
-	ssov1.RegisterAuthServer(gRPCServer, &serverAPI{auth: auth})
+	ssov2.RegisterAuthServer(gRPCServer, &serverAPI{auth: auth})
 }
-
 func (s *serverAPI) Login(
 	ctx context.Context,
-	in *ssov1.LoginRequest,
-) (*ssov1.LoginResponse, error) {
+	in *ssov2.LoginRequest,
+) (*ssov2.LoginResponse, error) {
 
-	if _, err := mail.ParseAddress(in.Email); err != nil {
-		return nil, status.Error(codes.InvalidArgument, "Invalid email")
+	_, err := verifyEmail(in.Email)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid email")
 	}
+
 	if in.Password == "" {
 		return nil, status.Error(codes.InvalidArgument, "No password")
 	}
-	if in.AppId == nilApp {
+
+	appUUID, err := uuid.Parse(in.GetAppUuid())
+	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "No App")
 	}
 
-	token, err := s.auth.Login(ctx, in.GetEmail(), in.GetPassword(), int(in.GetAppId()))
+	accessToken, refreshToken, err := s.auth.Login(ctx, in.GetEmail(), in.GetPassword(), appUUID)
 
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
@@ -66,23 +101,24 @@ func (s *serverAPI) Login(
 		return nil, status.Error(codes.Internal, "failed to login")
 	}
 
-	return &ssov1.LoginResponse{Token: token}, nil
+	return &ssov2.LoginResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
 }
 
 func (s *serverAPI) Register(
 	ctx context.Context,
-	in *ssov1.RegisterRequest,
-) (*ssov1.RegisterResponse, error) {
+	in *ssov2.RegisterRequest,
+) (*ssov2.OperationResponse, error) {
 
-	if in.Email == "" {
-		return nil, status.Error(codes.InvalidArgument, "email is required")
+	_, err := verifyEmail(in.Email)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid email")
 	}
 
 	if in.Password == "" {
 		return nil, status.Error(codes.InvalidArgument, "password is required")
 	}
 
-	uid, err := s.auth.RegisterNewUser(ctx, in.GetEmail(), in.GetPassword())
+	_, err = s.auth.RegisterNewUser(ctx, in.GetEmail(), in.GetPassword())
 	if err != nil {
 		if errors.Is(err, storage.ErrUserExists) {
 			return nil, status.Error(codes.AlreadyExists, "user already exists")
@@ -91,5 +127,98 @@ func (s *serverAPI) Register(
 		return nil, status.Error(codes.Internal, "failed to register user")
 	}
 
-	return &ssov1.RegisterResponse{UserId: uid}, nil
+	return &ssov2.OperationResponse{Success: true}, nil
+
+}
+
+func (s *serverAPI) Logout(ctx context.Context, in *ssov2.LogoutRequest) (*ssov2.OperationResponse, error) {
+
+	appUUID, err := uuid.Parse(in.GetAppUuid())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No App")
+	}
+
+	_, err = verifyEmail(in.GetEmail())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "incorrect email")
+	}
+
+	err = s.auth.Logout(ctx, in.GetEmail(), appUUID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to logout user")
+	}
+	return &ssov2.OperationResponse{Success: true}, nil
+
+}
+
+func (s *serverAPI) AddPermission(ctx context.Context, in *ssov2.AddPermissionRequest) (*ssov2.AddPermissionResponse, error) {
+
+	appUUID, err := uuid.Parse(in.GetAppUuid())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No App")
+	}
+
+	permissionUUID, err := s.auth.AddPermission(ctx, appUUID, in.PermissionName)
+
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to add permission")
+	}
+	return &ssov2.AddPermissionResponse{UUID: permissionUUID.String()}, nil
+}
+
+func (s *serverAPI) RemovePermission(ctx context.Context, in *ssov2.RemovePermissionRequest) (*ssov2.OperationResponse, error) {
+
+	appUUID, err := uuid.Parse(in.GetAppUuid())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No App")
+	}
+
+	err = s.auth.RemovePermission(ctx, appUUID, in.PermissionName)
+
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to remove permission")
+	}
+	return &ssov2.OperationResponse{Success: true}, nil
+
+}
+
+func (s *serverAPI) GrantPermission(ctx context.Context, in *ssov2.GrantPermissionRequest) (*ssov2.LoginResponse, error) {
+
+	_, err := verifyEmail(in.GetEmail())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "incorrect email")
+	}
+	accessToken, refreshToken, err := s.auth.GrantPermission(ctx, in.GetEmail(), in.GetPermissionName())
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to grant permission")
+	}
+	return &ssov2.LoginResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+func (s *serverAPI) RevokePermission(ctx context.Context, in *ssov2.RevokePermissionRequest) (*ssov2.LoginResponse, error) {
+	_, err := verifyEmail(in.GetEmail())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "incorrect email")
+	}
+	accessToken, refreshToken, err := s.auth.RevokePermission(ctx, in.GetEmail(), in.GetPermissionName())
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to revoke permission")
+	}
+	return &ssov2.LoginResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+func (s *serverAPI) RefreshToken(ctx context.Context, in *ssov2.RefreshTokenRequest) (*ssov2.LoginResponse, error) {
+
+	accessToken, refreshToken, err := s.auth.RefreshToken(ctx, in.Token)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to grant permission")
+	}
+	return &ssov2.LoginResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+func verifyEmail(email string) (bool, error) {
+	if _, err := mail.ParseAddress(email); err != nil {
+		return false, errors.New("invalid email")
+	}
+	return true, nil
 }

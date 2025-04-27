@@ -1,4 +1,3 @@
-storage/sso.db
-config/config_local.yaml
-migrations/1_init.down.sql
-migrations/1_init.up.sql
+storage/
+config/
+migrations/
