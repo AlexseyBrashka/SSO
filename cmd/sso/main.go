@@ -30,6 +30,7 @@ func main() {
 	}
 
 	dbName := os.Getenv("DB_NAME")
+
 	dbConn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		os.Getenv("DB_HOST"),
@@ -44,10 +45,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
+
 	defer storage.Stop()
-	TTL, err := time.ParseDuration(os.Getenv("TOKEN_TTL"))
+
+	AccessTTL, err := time.ParseDuration(os.Getenv("ACCESS_TOKEN_TTL"))
 	if err != nil {
 		log.Fatalf("Invalid ACCESS_TOKEN_TTL: %v", err)
+	}
+	RefreshTTL, err := time.ParseDuration(os.Getenv("REFRESH_TOKEN_TTL"))
+	if err != nil {
+		log.Fatalf("Invalid REFRESH_TOKEN_TTL: %v", err)
 	}
 
 	authApp := models.NewApp(uuid.New(), os.Getenv("APP_NAME"), os.Getenv("APP_SECRET"))
@@ -59,22 +66,35 @@ func main() {
 		log.Fatalf("Failed to initialize limiters: %v", err)
 	}
 
-	Auth := auth.New(*authApp, models.NewRedisClient("localhost:6379", "1", 0, TTL), TTL, TTL, storage, limiters.RegLimiter, limiters.LoginLimiter, loger)
+	casherAddr := os.Getenv("CasherAddress")
+	casherPort := os.Getenv("6379")
+	casherPath := casherAddr + ":" + casherPort
+
+	casherPassword := os.Getenv("CasherPassword")
+	if casherPassword == "" {
+		log.Fatalf("empty casher password")
+	}
+
+	casherDB := os.Getenv("CasherDBId")
+	casherDBID, err := strconv.Atoi(casherDB)
+	if err != nil {
+		log.Fatalf("error cant use casher db id(%v)", casherDBID)
+	}
+
+	casher := models.NewRedisClient(casherPath, casherPassword, casherDBID, RefreshTTL)
+
+	Auth := auth.New(*authApp, casher, AccessTTL, RefreshTTL, storage, limiters.RegLimiter, limiters.LoginLimiter, loger)
 
 	grpcPortStr := os.Getenv("GRPC_PORT")
 	grpcPort, err := strconv.Atoi(grpcPortStr)
 	if err != nil {
 		log.Fatalf("Invalid GRPC_PORT: %v", err)
 	}
+
 	app := grpcapp.New(loger, Auth, grpcPort)
 	app.MustRun()
 
 	defer app.Stop()
-	//TODO реализовать систему redis кэша токенов, с TTL, возможность перешифроки паролев новым ключем.
-	// TODO: спросить у прыепода, как сделать разлогинивание, обновление пользователя ( стоит ли делать пароли для сервисов),
-	// что бы из вне фиг обратиться
-
-	//todo проверить защиту от брутфорса
 }
 
 func setupLogger(env string) *slog.Logger {
