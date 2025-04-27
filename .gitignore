@@ -2,3 +2,4 @@ storage/
 config/
 migrations/
 .idea/
+.env
