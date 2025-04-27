@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// TODO поменять на интерфейс ( что бы можно было подменять )
 type RedisCasher struct {
 	*redisGo.Client
 	RefreshTTL time.Duration

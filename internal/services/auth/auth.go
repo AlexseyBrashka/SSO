@@ -1,10 +1,10 @@
 package auth
 
 import (
+	verfic "SSO/internal/lib/verifications"
 	"SSO/internal/storage"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"go/token"
 	_ "sync"
 
 	"context"
@@ -33,6 +33,7 @@ type Storage interface {
 	SavePermission(ctx context.Context, permUUID uuid.UUID, appUUID uuid.UUID, permission string) (models.Permission, error)
 	AddUserPermissions(ctx context.Context, email string, appUUID uuid.UUID, permUUID uuid.UUID) error
 	RevokeUserPermissions(ctx context.Context, email string, appUUID uuid.UUID, permUUID uuid.UUID) error
+	GetAppPermissions(ctx context.Context, appUUID uuid.UUID) ([]models.Permission, error)
 }
 
 type Auth struct {
@@ -68,7 +69,6 @@ func New(
 		log:          Log,
 	}
 }
-
 func (a *Auth) RegisterNewUser(ctx context.Context, email string, password string) (uuid.UUID, error) {
 	const op = "Auth.RegisterNewUser"
 	log := a.log.With(
@@ -220,6 +220,7 @@ func (a *Auth) RevokePermission(ctx context.Context, email string, AppUUID uuid.
 }
 func (a *Auth) RefreshToken(ctx context.Context, RefreshToken string) (accessToken string, refreshToken string, err error) {
 	op := "Auth.RefreshToken"
+
 	refToken, err := jwt.Parse(RefreshToken,
 		func(refToken *jwt.Token) (interface{}, error) {
 			tokenChecked, err := refToken.SignedString(a.authApp.Secret)
@@ -228,18 +229,54 @@ func (a *Auth) RefreshToken(ctx context.Context, RefreshToken string) (accessTok
 			}
 			return tokenChecked, nil
 		})
-	if claims, ok := refToken.Claims.(jwt.MapClaims); ok && refToken.Valid {
-		issuedAt := time.Unix(int64(claims["iat"].(float64)), 0)
-		if time.Now().After(issuedAt) {
-			return "", "", ErrTokenExpired
-		} else {
-			fmt.Println("Token is valid")
-		}
-	} else {
-		fmt.Println(err)
+
+	claims, ok := refToken.Claims.(jwt.MapClaims)
+	if ok != true {
+		return "", "", fmt.Errorf("%s: %w", op, ErrInvalidRefreshToken)
 	}
 
+	expired := time.Unix(claims["exp"].(int64), 0)
+	if time.Now().After(expired) {
+		return "", "", fmt.Errorf("%s: %w", op, ErrTokenExpired)
+	}
+
+	appUUID, err := uuid.Parse(claims["app"].(string))
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", op, ErrInvalidRefreshToken)
+	}
+
+	email := claims["email"].(string) //TODO почитать про приведение типов
+
+	checkedEmail, err := verfic.VerifyEmail(email)
+	if checkedEmail != true || err != nil {
+		return "", "", fmt.Errorf("%s: %w", op, ErrInvalidRefreshToken)
+	}
+
+	user, err := a.storage.UserWithPermissions(ctx, email, appUUID)
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", op, err)
+	}
+
+	tokens, err := a.createTokenPair(ctx, user, appUUID)
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", op, err)
+	}
+
+	return tokens.AccessToken, tokens.RefreshToken, nil
+
 }
+
+func (a *Auth) GetAppPermissions(ctx context.Context, appUUID uuid.UUID) ([]models.Permission, error) {
+	const op = "Auth.GetAppPermissions"
+
+	permissions, err := a.storage.GetAppPermissions(ctx, appUUID)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+
+	}
+	return permissions, nil
+}
+
 func (a *Auth) createTokenPair(ctx context.Context, user models.User, appUUID uuid.UUID) (TokenPair models.Tokens, err error) {
 	const op = "Auth.createTokenPair"
 	tokenPair, err := jwtLib.CreateTokenPair(ctx, user, a.authApp, appUUID, a.accessTTL, a.refreshTTL)

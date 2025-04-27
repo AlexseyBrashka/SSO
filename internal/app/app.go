@@ -16,21 +16,23 @@ type App struct {
 }
 
 func New(
-	log *slog.Logger,
+	authApp models.AuthApp,
+	casher *models.RedisCasher,
+	accTokenTTL time.Duration,
+	refTokenTTL time.Duration,
 	migrationPath string,
 	dbName string,
-	authApp models.AuthApp,
-	Limiters *models.Limiters,
+	limiters *models.Limiters,
+	log *slog.Logger,
 	grpcPort int,
 	connStr string,
-	tokenTTL time.Duration,
 ) *App {
 	storage, err := postgresql.New(context.Background(), migrationPath, connStr, dbName)
 	if err != nil {
 		panic(err)
 	}
 
-	authService := auth.New(tokenTTL, authApp, storage, Limiters.RegLimiter, Limiters.LoginLimiter, log)
+	authService := auth.New(authApp, casher, accTokenTTL, refTokenTTL, storage, limiters.RegLimiter, limiters.LoginLimiter, log)
 
 	grpcApp := grpcapp.New(log, authService, grpcPort)
 

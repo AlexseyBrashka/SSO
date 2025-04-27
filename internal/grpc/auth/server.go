@@ -1,11 +1,12 @@
 package server
 
 import (
+	"SSO/internal/domain/models"
+	verfic "SSO/internal/lib/verifications"
 	"SSO/internal/storage"
 	"context"
 	"errors"
 	"github.com/google/uuid"
-	"net/mail"
 
 	ssov2 "github.com/AlexseyBrashka/protos/gen/go/sso"
 
@@ -49,25 +50,29 @@ type Auth interface {
 	RemovePermission(
 		ctx context.Context,
 		appUUID uuid.UUID,
-		permission string,
-	) error
+		permissionUUID uuid.UUID) error
 
 	GrantPermission(
 		ctx context.Context,
 		email string,
-		permission string,
-	) (accessToken string, refreshToken string, err error)
+		AppUUID uuid.UUID,
+		permissionUUID uuid.UUID) (string, string, error)
 
 	RevokePermission(
 		ctx context.Context,
 		email string,
-		permission string,
-	) (accessToken string, refreshToken string, err error)
+		appUUID uuid.UUID,
+		permissionUUID uuid.UUID,
+	) (string, string, error)
 
 	RefreshToken(
 		ctx context.Context,
 		actualRefreshToken string,
 	) (accessToken string, refreshToken string, err error)
+	GetAppPermissions(
+		ctx context.Context,
+		appUUID uuid.UUID,
+	) ([]models.Permission, error)
 }
 
 func Register(gRPCServer *grpc.Server, auth Auth) {
@@ -78,7 +83,7 @@ func (s *serverAPI) Login(
 	in *ssov2.LoginRequest,
 ) (*ssov2.LoginResponse, error) {
 
-	_, err := verifyEmail(in.Email)
+	_, err := verfic.VerifyEmail(in.Email)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid email")
 	}
@@ -109,7 +114,7 @@ func (s *serverAPI) Register(
 	in *ssov2.RegisterRequest,
 ) (*ssov2.OperationResponse, error) {
 
-	_, err := verifyEmail(in.Email)
+	_, err := verfic.VerifyEmail(in.Email)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid email")
 	}
@@ -133,12 +138,12 @@ func (s *serverAPI) Register(
 
 func (s *serverAPI) Logout(ctx context.Context, in *ssov2.LogoutRequest) (*ssov2.OperationResponse, error) {
 
-	appUUID, err := uuid.Parse(in.GetAppUuid())
+	appUUID, err := uuid.Parse(in.GetAppUUID())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "No App")
 	}
 
-	_, err = verifyEmail(in.GetEmail())
+	_, err = verfic.VerifyEmail(in.GetEmail())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "incorrect email")
 	}
@@ -153,7 +158,7 @@ func (s *serverAPI) Logout(ctx context.Context, in *ssov2.LogoutRequest) (*ssov2
 
 func (s *serverAPI) AddPermission(ctx context.Context, in *ssov2.AddPermissionRequest) (*ssov2.AddPermissionResponse, error) {
 
-	appUUID, err := uuid.Parse(in.GetAppUuid())
+	appUUID, err := uuid.Parse(in.GetAppUUID())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "No App")
 	}
@@ -168,12 +173,17 @@ func (s *serverAPI) AddPermission(ctx context.Context, in *ssov2.AddPermissionRe
 
 func (s *serverAPI) RemovePermission(ctx context.Context, in *ssov2.RemovePermissionRequest) (*ssov2.OperationResponse, error) {
 
-	appUUID, err := uuid.Parse(in.GetAppUuid())
+	appUUID, err := uuid.Parse(in.GetAppUUID())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "No App")
 	}
 
-	err = s.auth.RemovePermission(ctx, appUUID, in.PermissionName)
+	permUUID, err := uuid.Parse(in.GetPermissionUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No Permission")
+	}
+
+	err = s.auth.RemovePermission(ctx, appUUID, permUUID)
 
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to remove permission")
@@ -184,11 +194,23 @@ func (s *serverAPI) RemovePermission(ctx context.Context, in *ssov2.RemovePermis
 
 func (s *serverAPI) GrantPermission(ctx context.Context, in *ssov2.GrantPermissionRequest) (*ssov2.LoginResponse, error) {
 
-	_, err := verifyEmail(in.GetEmail())
+	_, err := verfic.VerifyEmail(in.GetEmail())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "incorrect email")
 	}
-	accessToken, refreshToken, err := s.auth.GrantPermission(ctx, in.GetEmail(), in.GetPermissionName())
+
+	appUUID, err := uuid.Parse(in.GetAppUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No App")
+	}
+
+	permUUID, err := uuid.Parse(in.GetPermissionUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No Permission")
+	}
+
+	accessToken, refreshToken, err := s.auth.GrantPermission(ctx, in.GetEmail(), appUUID, permUUID)
+
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to grant permission")
 	}
@@ -196,11 +218,23 @@ func (s *serverAPI) GrantPermission(ctx context.Context, in *ssov2.GrantPermissi
 }
 
 func (s *serverAPI) RevokePermission(ctx context.Context, in *ssov2.RevokePermissionRequest) (*ssov2.LoginResponse, error) {
-	_, err := verifyEmail(in.GetEmail())
+
+	_, err := verfic.VerifyEmail(in.GetEmail())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "incorrect email")
 	}
-	accessToken, refreshToken, err := s.auth.RevokePermission(ctx, in.GetEmail(), in.GetPermissionName())
+
+	appUUID, err := uuid.Parse(in.GetAppUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No App")
+	}
+
+	permUUID, err := uuid.Parse(in.GetPermissionUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "No Permission")
+	}
+
+	accessToken, refreshToken, err := s.auth.RevokePermission(ctx, in.GetEmail(), appUUID, permUUID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke permission")
 	}
@@ -215,10 +249,22 @@ func (s *serverAPI) RefreshToken(ctx context.Context, in *ssov2.RefreshTokenRequ
 	}
 	return &ssov2.LoginResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
 }
+func (s *serverAPI) GetAppPermissions(ctx context.Context, in *ssov2.GetAppPermissionsRequest) (*ssov2.GetAppPermissionsResponse, error) {
 
-func verifyEmail(email string) (bool, error) {
-	if _, err := mail.ParseAddress(email); err != nil {
-		return false, errors.New("invalid email")
+	appUUID, err := uuid.Parse(in.GetAppUUID())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "incorrect app uuid")
 	}
-	return true, nil
+
+	perms, err := s.auth.GetAppPermissions(ctx, appUUID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "cant get app's permissions")
+	}
+
+	var permissions []*ssov2.Perm
+
+	for _, perm := range perms {
+		permissions = append(permissions, &ssov2.Perm{UUID: perm.UUID.String(), Name: perm.Name})
+	}
+	return &ssov2.GetAppPermissionsResponse{Permissions: permissions}, nil
 }
